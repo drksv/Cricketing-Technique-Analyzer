@@ -1,48 +1,49 @@
 import os
-import json
 from flask import Flask, request, jsonify
 from cricket_pose_utils import analyze_video_vs_ideal
+import json
 
 app = Flask(__name__)
 
-# Load scenario mapping
+# Load scenario mapping from JSON
 with open('utils/scenario_mapping.json') as f:
     scenario_mapping = json.load(f)
 
-# API endpoint to check available scenarios
-@app.route("/scenarios", methods=["GET"])
+# Root route — health check / homepage
+@app.route('/')
+def home():
+    return "🏏 Hello from Health Timeout Cricket Technique Analyzer!"
+
+# Route to get available scenarios
+@app.route('/scenarios', methods=['GET'])
 def get_scenarios():
     return jsonify(scenario_mapping)
 
-# Function to get video URL from env vars
-def get_video_url(scenario_option):
-    mapping = {
-        "pull_shot": os.environ.get("PULL_SHOT_URL"),
-        "cover_drive": os.environ.get("COVER_DRIVE_URL"),
-        "yorker": os.environ.get("YORKER_URL"),
-        "bouncer": os.environ.get("BOUNCER_URL")
-    }
-    return mapping.get(scenario_option)
-
-# API endpoint to analyze uploaded video
-@app.route("/analyze", methods=["POST"])
+# Video analysis route
+@app.route('/analyze', methods=['POST'])
 def analyze_video():
-    scenario_option = request.form.get("scenario")
-    if "video" not in request.files:
-        return jsonify({"error": "No video file uploaded"}), 400
+    video = request.files.get('video')
+    scenario = request.form.get('scenario')
 
-    video_file = request.files["video"]
-    video_path = "temp_user_video.mp4"
-    video_file.save(video_path)
+    if not video or not scenario:
+        return jsonify({'error': 'Please provide both video and scenario.'}), 400
 
-    ideal_video_url = get_video_url(scenario_option)
+    video_path = 'temp_user_video.mp4'
+    video.save(video_path)
+
+    ideal_video_url = scenario_mapping.get('batting' if scenario in scenario_mapping['batting'] else 'bowling', {}).get(scenario)
+
     if not ideal_video_url:
-        return jsonify({"error": "Invalid scenario selected"}), 400
+        return jsonify({'error': f'Scenario {scenario} not found.'}), 404
 
-    result = analyze_video_vs_ideal(video_path, ideal_video_url)
+    score, issues = analyze_video_vs_ideal(video_path, ideal_video_url)
 
-    os.remove(video_path)
-    return jsonify(result)
+    return jsonify({
+        'score': score,
+        'issues': issues
+    })
 
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8000)
+if __name__ == '__main__':
+    # Pick up port from environment variable or default to 10000
+    port = int(os.environ.get('PORT', 10000))
+    app.run(host='0.0.0.0', port=port, debug=True)
