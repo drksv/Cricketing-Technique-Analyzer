@@ -2,64 +2,85 @@ import cv2
 import mediapipe as mp
 import urllib.request
 import numpy as np
+import tempfile
+import os
 
 mp_pose = mp.solutions.pose
 
-def download_video(video_url, save_path):
-    urllib.request.urlretrieve(video_url, save_path)
+def download_video(url, save_path):
+    """Download video from a URL to a local path."""
+    urllib.request.urlretrieve(url, save_path)
 
-def extract_pose_landmarks(video_path):
+def extract_landmarks_from_video(video_path):
+    """Extract pose landmarks from a video file."""
     cap = cv2.VideoCapture(video_path)
     pose = mp_pose.Pose()
-    landmarks_all_frames = []
+    landmarks_list = []
+
     while cap.isOpened():
         ret, frame = cap.read()
         if not ret:
             break
-        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        results = pose.process(frame_rgb)
+
+        # Convert the image color and process
+        image_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        results = pose.process(image_rgb)
+
         if results.pose_landmarks:
-            landmarks = [(lm.x, lm.y, lm.z) for lm in results.pose_landmarks.landmark]
-            landmarks_all_frames.append(landmarks)
+            landmarks = [(lm.x, lm.y) for lm in results.pose_landmarks.landmark]
+            landmarks_list.append(landmarks)
+
     cap.release()
-    return landmarks_all_frames
+    return landmarks_list
 
 def compare_poses(user_landmarks, ideal_landmarks):
+    """Compare user video landmarks vs ideal video landmarks and score."""
     frame_count = min(len(user_landmarks), len(ideal_landmarks))
     total_score = 0
     issues = []
-
-    important_joints = {
-        0: 'nose', 11: 'left_shoulder', 12: 'right_shoulder', 
-        13: 'left_elbow', 14: 'right_elbow',
-        15: 'left_wrist', 16: 'right_wrist',
-        23: 'left_hip', 24: 'right_hip',
-        25: 'left_knee', 26: 'right_knee',
-        27: 'left_ankle', 28: 'right_ankle'
-    }
 
     for i in range(frame_count):
         user_frame = user_landmarks[i]
         ideal_frame = ideal_landmarks[i]
         frame_score = 0
 
-        for idx, joint in important_joints.items():
-            user_joint = np.array(user_frame[idx])
-            ideal_joint = np.array(ideal_frame[idx])
-            distance = np.linalg.norm(user_joint - ideal_joint)
-            if distance < 0.05:
-                frame_score += 1
-            else:
-                issues.append(f"{joint.replace('_', ' ').title()} needs adjustment in frame {i+1}")
+        for idx, (u, ideal) in enumerate(zip(user_frame, ideal_frame)):
+            dist = np.linalg.norm(np.array(u) - np.array(ideal))
+            frame_score += max(0, 1 - dist * 10)  # Normalize score between 0-1
 
-        total_score += (frame_score / len(important_joints)) * 100
+        frame_score /= len(user_frame)
+        total_score += frame_score * 100  # Scale to 100
 
-    final_score = max(0, min(100, total_score / frame_count)) if frame_count > 0 else 0
+        # Example: check specific joints — indices per Mediapipe spec
+        key_joints = {"Elbow": 13, "Knee": 25, "Shoulder": 11, "Ankle": 27}
+        for name, idx in key_joints.items():
+            dist = np.linalg.norm(np.array(user_frame[idx]) - np.array(ideal_frame[idx]))
+            if dist > 0.08:
+                issues.append(f"Frame {i+1}: {name} needs improvement.")
+
+    final_score = max(0, min(100, total_score / frame_count))
     return final_score, issues
 
-def analyze_video_vs_ideal(user_video_path, ideal_video_url):
-    download_video(ideal_video_url, "temp_ideal_video.mp4")
-    user_landmarks = extract_pose_landmarks(user_video_path)
-    ideal_landmarks = extract_pose_landmarks("temp_ideal_video.mp4")
+def analyze_video_vs_ideal(user_video_file, ideal_video_url):
+    """Main analysis function."""
+    with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as tmp:
+        user_video_path = tmp.name
+        user_video_file.save(user_video_path)
+
+    # Download ideal video to temp file
+    ideal_video_path = os.path.join(tempfile.gettempdir(), "ideal_video.mp4")
+    download_video(ideal_video_url, ideal_video_path)
+
+    user_landmarks = extract_landmarks_from_video(user_video_path)
+    ideal_landmarks = extract_landmarks_from_video(ideal_video_path)
+
     score, issues = compare_poses(user_landmarks, ideal_landmarks)
-    return {"score": round(score, 2), "issues": issues}
+
+    os.remove(user_video_path)
+    os.remove(ideal_video_path)
+
+    result = {
+        "score": round(score, 2),
+        "issues": issues if issues else ["Looks great! Minimal adjustments needed."]
+    }
+    return result
