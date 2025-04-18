@@ -1,49 +1,41 @@
 import os
-from flask import Flask, request, jsonify
-from cricket_pose_utils import analyze_video_vs_ideal
 import json
+from flask import Flask, request
 
 app = Flask(__name__)
 
-# Load scenario mapping from JSON
+# Load scenario mapping
 with open('utils/scenario_mapping.json') as f:
     scenario_mapping = json.load(f)
 
-# Root route — health check / homepage
-@app.route('/')
-def home():
-    return "🏏 Hello from Health Timeout Cricket Technique Analyzer!"
+# Map scenario names to environment variable keys
+video_url_env_map = {
+    "pull_shot": "PULL_SHOT_URL",
+    "cover_drive": "COVER_DRIVE_URL",
+    "yorker": "YORKER_URL",
+    "bouncer": "BOUNCER_URL"
+}
 
-# Route to get available scenarios
-@app.route('/scenarios', methods=['GET'])
-def get_scenarios():
-    return jsonify(scenario_mapping)
-
-# Video analysis route
-@app.route('/analyze', methods=['POST'])
+@app.route("/analyze", methods=["POST"])
 def analyze_video():
-    video = request.files.get('video')
-    scenario = request.form.get('scenario')
+    if 'video' not in request.files or 'scenario' not in request.form:
+        return "Missing video file or scenario", 400
 
-    if not video or not scenario:
-        return jsonify({'error': 'Please provide both video and scenario.'}), 400
+    video_file = request.files['video']
+    scenario = request.form['scenario']
 
-    video_path = 'temp_user_video.mp4'
-    video.save(video_path)
+    # Check if scenario is valid
+    if scenario in scenario_mapping['batting'] or scenario in scenario_mapping['bowling']:
+        video_env_var = video_url_env_map.get(scenario)
+        if not video_env_var:
+            return "Video URL for scenario not configured.", 400
 
-    ideal_video_url = scenario_mapping.get('batting' if scenario in scenario_mapping['batting'] else 'bowling', {}).get(scenario)
+        ideal_video_url = os.getenv(video_env_var)
+        if not ideal_video_url:
+            return f"Environment variable {video_env_var} not set.", 500
+    else:
+        return "Invalid scenario selected.", 400
 
-    if not ideal_video_url:
-        return jsonify({'error': f'Scenario {scenario} not found.'}), 404
-
-    score, issues = analyze_video_vs_ideal(video_path, ideal_video_url)
-
-    return jsonify({
-        'score': score,
-        'issues': issues
-    })
-
-if __name__ == '__main__':
-    # Pick up port from environment variable or default to 10000
-    port = int(os.environ.get('PORT', 10000))
-    app.run(host='0.0.0.0', port=port, debug=True)
+    # Now use ideal_video_url in your pose analysis function
+    result = analyze_video_vs_ideal(video_file, ideal_video_url)
+    return result
