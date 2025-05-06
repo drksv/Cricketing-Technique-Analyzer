@@ -1,11 +1,14 @@
 import os
 import json
 from flask import Flask, request, jsonify, render_template_string
+from flask_cors import CORS
 
 from cricket_pose_utils import analyze_video_vs_ideal  # Make sure you import your function properly
 
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50 MB upload limit
+# Allow specific origin
+CORS(app, origins=["https://www.healthtimeout.great-site.net"])
 
 # Load scenario mapping
 with open('utils/scenario_mapping.json') as f:
