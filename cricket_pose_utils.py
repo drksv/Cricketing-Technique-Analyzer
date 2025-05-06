@@ -36,6 +36,10 @@ def extract_landmarks_from_video(video_path):
 def compare_poses(user_landmarks, ideal_landmarks):
     """Compare user video landmarks vs ideal video landmarks and score."""
     frame_count = min(len(user_landmarks), len(ideal_landmarks))
+
+    if frame_count == 0:
+        return 0, ["Could not detect poses in one or both videos. Ensure both videos show the full body clearly."]
+
     total_score = 0
     issues = []
 
@@ -46,12 +50,11 @@ def compare_poses(user_landmarks, ideal_landmarks):
 
         for idx, (u, ideal) in enumerate(zip(user_frame, ideal_frame)):
             dist = np.linalg.norm(np.array(u) - np.array(ideal))
-            frame_score += max(0, 1 - dist * 10)  # Normalize score between 0-1
+            frame_score += max(0, 1 - dist * 10)
 
         frame_score /= len(user_frame)
         total_score += frame_score * 100  # Scale to 100
 
-        # Example: check specific joints — indices per Mediapipe spec
         key_joints = {"Elbow": 13, "Knee": 25, "Shoulder": 11, "Ankle": 27}
         for name, idx in key_joints.items():
             dist = np.linalg.norm(np.array(user_frame[idx]) - np.array(ideal_frame[idx]))
@@ -61,23 +64,29 @@ def compare_poses(user_landmarks, ideal_landmarks):
     final_score = max(0, min(100, total_score / frame_count))
     return final_score, issues
 
+
 def analyze_video_vs_ideal(user_video_file, ideal_video_url):
     """Main analysis function."""
     with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as tmp:
         user_video_path = tmp.name
         user_video_file.save(user_video_path)
 
-    # Download ideal video to temp file
     ideal_video_path = os.path.join(tempfile.gettempdir(), "ideal_video.mp4")
     download_video(ideal_video_url, ideal_video_path)
 
     user_landmarks = extract_landmarks_from_video(user_video_path)
     ideal_landmarks = extract_landmarks_from_video(ideal_video_path)
 
-    score, issues = compare_poses(user_landmarks, ideal_landmarks)
-
     os.remove(user_video_path)
     os.remove(ideal_video_path)
+
+    if not user_landmarks:
+        return {"score": 0, "issues": ["Could not detect pose in your video. Make sure the body is clearly visible."]}
+
+    if not ideal_landmarks:
+        return {"score": 0, "issues": ["Could not process the ideal video. Check configuration."]}
+
+    score, issues = compare_poses(user_landmarks, ideal_landmarks)
 
     result = {
         "score": round(score, 2),
