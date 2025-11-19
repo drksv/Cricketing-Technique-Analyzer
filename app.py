@@ -8,7 +8,7 @@ from cricket_pose_utils import analyze_video_vs_ideal  # Make sure you import yo
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50 MB upload limit
 # Allow specific origin
-CORS(app, origins=["https://www.healthtimeout.great-site.net"])
+CORS(app, origins=["https://healthtimeout.in/"])
 
 # Load scenario mapping
 with open('utils/scenario_mapping.json') as f:
@@ -64,3 +64,4 @@ def analyze_video():
 
     result = analyze_video_vs_ideal(video_file, ideal_video_url)
     return jsonify(result)
+
