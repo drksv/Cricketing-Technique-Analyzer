@@ -1,77 +1,131 @@
 import cv2
 import mediapipe as mp
-import urllib.request
 import numpy as np
-import tempfile
-import os
 
+# ------------------------------------------------------------
+# 1. Load MediaPipe Pose ONCE (major optimization)
+# ------------------------------------------------------------
 mp_pose = mp.solutions.pose
+_pose = mp_pose.Pose(
+    static_image_mode=True,        # Faster for frame-by-frame
+    model_complexity=0,            # Lite model — required for low memory
+    smooth_landmarks=False,
+    enable_segmentation=False
+)
 
-# Reduce MediaPipe threading → avoids OOM
-cv2.setNumThreads(1)
-
-def download_video(url, save_path):
-    urllib.request.urlretrieve(url, save_path)
-
-def extract_landmarks_from_video(video_path):
+# ------------------------------------------------------------
+# 2. Extract pose landmarks from video (optimized)
+# ------------------------------------------------------------
+def extract_landmarks_from_video(video_path, frame_skip=5, max_frames=150):
+    """
+    Extract pose landmarks from a video by sampling every Nth frame.
+    - frame_skip=5 → processes every 6th frame → huge speed boost
+    - max_frames caps usage so Render workers don't timeout
+    """
     cap = cv2.VideoCapture(video_path)
-    pose = mp_pose.Pose(model_complexity=0)  # much smaller model
-    landmarks_list = []
 
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
+    if not cap.isOpened():
+        print(f"[ERROR] Could not open video: {video_path}")
+        return []
 
-        frame = cv2.resize(frame, (480, 270))  # reduce memory drastically
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    all_frames_landmarks = []
+    frame_count = 0
+    processed_frames = 0
 
-        results = pose.process(rgb)
-        if results.pose_landmarks:
-            landmarks = [(lm.x, lm.y) for lm in results.pose_landmarks.landmark]
-            landmarks_list.append(landmarks)
+    try:
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
 
-    cap.release()
-    return landmarks_list
+            # Skip frames for speed & memory
+            if frame_count % frame_skip != 0:
+                frame_count += 1
+                continue
+
+            frame_count += 1
+            processed_frames += 1
+
+            # Safety cap → prevents Render timeouts
+            if processed_frames > max_frames:
+                break
+
+            # Downscale frame to reduce MediaPipe load
+            frame = cv2.resize(frame, (320, 180))  # lightweight resolution
+
+            # Convert to RGB
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+            # Run pose detection
+            results = _pose.process(rgb)
+
+            # Save landmarks (if detected)
+            if results.pose_landmarks:
+                lm = [
+                    (
+                        lm.x,
+                        lm.y,
+                        lm.z,
+                        lm.visibility
+                    )
+                    for lm in results.pose_landmarks.landmark
+                ]
+                all_frames_landmarks.append(lm)
+
+    finally:
+        cap.release()
+
+    return all_frames_landmarks
 
 
-def compare_poses(user_landmarks, ideal_landmarks):
-    frame_count = min(len(user_landmarks), len(ideal_landmarks))
-    if frame_count == 0:
-        return 0, ["No pose detected in one or both videos."]
+# ------------------------------------------------------------
+# 3. Compare user vs ideal pose sequences
+# ------------------------------------------------------------
+def compare_landmark_sequences(user_seq, ideal_seq):
+    """
+    Compute a simple difference score between two landmark sequences.
+    The shorter one determines the number of frames used.
+    """
 
-    issues = []
-    total_score = 0
+    if len(user_seq) == 0 or len(ideal_seq) == 0:
+        return {
+            "score": 0,
+            "feedback": "Unable to extract pose landmarks from one or both videos."
+        }
 
-    for i in range(frame_count):
-        u = np.array(user_landmarks[i])
-        v = np.array(ideal_landmarks[i])
+    n = min(len(user_seq), len(ideal_seq))
+    diffs = []
 
-        dist = np.linalg.norm(u - v, axis=1)
-        frame_score = 1 - np.mean(dist * 10)
-        total_score += max(0, frame_score)
+    for i in range(n):
+        u = np.array(user_seq[i])
+        v = np.array(ideal_seq[i])
 
-        key = {"Elbow": 13, "Knee": 25, "Shoulder": 11, "Ankle": 27}
-        for name, idx in key.items():
-            if dist[idx] > 0.08:
-                issues.append(f"Frame {i+1}: {name} is misaligned.")
+        # Euclidean difference across landmarks
+        diff = np.linalg.norm(u[:, :3] - v[:, :3])
+        diffs.append(diff)
 
-    final_score = round(max(0, min(100, total_score / frame_count * 100)), 2)
-    return final_score, issues
+    avg_diff = float(np.mean(diffs))
+
+    # Lower diff → better similarity
+    score = max(0, 100 - avg_diff * 10)
+
+    return {
+        "score": round(score, 2),
+        "avg_difference": round(avg_diff, 4)
+    }
 
 
-def analyze_video_vs_ideal(user_video_path, ideal_video_url):
-    ideal_path = os.path.join(tempfile.gettempdir(), "ideal_video.mp4")
-    download_video(ideal_video_url, ideal_path)
-
+# ------------------------------------------------------------
+# 4. High-level API called by Flask endpoint
+# ------------------------------------------------------------
+def analyze_video_vs_ideal(user_video_path, ideal_video_path):
+    print("[INFO] Extracting user video pose...")
     user_lm = extract_landmarks_from_video(user_video_path)
-    ideal_lm = extract_landmarks_from_video(ideal_path)
 
-    if not user_lm:
-        return {"score": 0, "issues": ["Pose not detected in your video."]}
+    print("[INFO] Extracting ideal video pose...")
+    ideal_lm = extract_landmarks_from_video(ideal_video_path)
 
-    if not ideal_lm:
-        return {"score": 0, "issues": ["Ideal video could not be processed."]}
+    print("[INFO] Comparing pose frames...")
+    result = compare_landmark_sequences(user_lm, ideal_lm)
 
-    score, issues = compare_poses(user_lm, ideal_lm)
-    return {"score": score, "issues": issues or ["Looks good!"]}
+    return result
