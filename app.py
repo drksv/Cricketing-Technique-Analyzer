@@ -1,55 +1,46 @@
-from flask import Flask, request, jsonify, send_from_directory
-from flask_cors import CORS
 import os
-import uuid
-import shutil
+import json
+import tempfile
+import urllib.request
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+
+from cricket_pose_utils import analyze_video_vs_ideal  # Your pose analysis functions
 
 app = Flask(__name__)
-CORS(app)  # Allow requests from any origin
+CORS(app)  # Allow all origins for simplicity
 
-# Folders for uploads and processed videos
-UPLOAD_FOLDER = "/tmp/uploads"
-PROCESSED_FOLDER = "/tmp/processed"
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-os.makedirs(PROCESSED_FOLDER, exist_ok=True)
+app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50 MB limit
 
-# Dummy analysis function (replace with your cricket pose analysis)
-def run_cricket_analysis(input_path):
-    filename = os.path.basename(input_path)
-    processed_name = f"processed_{uuid.uuid4().hex}_{filename}"
-    processed_path = os.path.join(PROCESSED_FOLDER, processed_name)
-    # Copy file as placeholder for real analysis
-    shutil.copy(input_path, processed_path)
-    return processed_name
+# Mapping scenario → environment variable storing ideal video URL
+video_url_env_map = {
+    "pull_shot": "PULL_SHOT_URL",
+    "cover_drive": "COVER_DRIVE_URL",
+    "yorker": "YORKER_URL",
+    "bouncer": "BOUNCER_URL"
+}
 
-@app.route('/analyze', methods=['POST'])
-def analyze():
-    if 'user_video' not in request.files:
-        return jsonify({'error': 'Missing user_video'}), 400
+@app.route("/analyze", methods=["POST"])
+def analyze_video():
+    if 'video' not in request.files or 'scenario' not in request.form:
+        return jsonify({"error": "Missing video or scenario"}), 400
 
-    video_file = request.files['user_video']
-    if video_file.filename == '':
-        return jsonify({'error': 'Empty filename'}), 400
+    user_video_file = request.files['video']
+    scenario = request.form['scenario']
 
-    # Save uploaded video
-    saved_path = os.path.join(UPLOAD_FOLDER, video_file.filename)
-    video_file.save(saved_path)
+    if scenario not in video_url_env_map:
+        return jsonify({"error": "Invalid scenario selected"}), 400
 
-    # Run analysis
-    processed_filename = run_cricket_analysis(saved_path)
+    ideal_video_url = os.getenv(video_url_env_map[scenario])
+    if not ideal_video_url:
+        return jsonify({"error": f"Ideal video URL for {scenario} not configured"}), 500
 
-    # Generate full URL for frontend (replace with your actual deployed domain)
-    analysis_url = f"https://cricketing-technique-analyzer.onrender.com/processed/{processed_filename}"
+    try:
+        result = analyze_video_vs_ideal(user_video_file, ideal_video_url)
+        return jsonify(result)
+    except Exception as e:
+        print(f"[ERROR] {e}")
+        return jsonify({"error": "Failed to analyze video"}), 500
 
-    return jsonify({
-        'status': 'Analysis complete!',
-        'analysis_video_url': analysis_url
-    })
-
-# Serve processed videos
-@app.route('/processed/<filename>')
-def serve_processed(filename):
-    return send_from_directory(PROCESSED_FOLDER, filename)
-
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=10000, debug=True)
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=10000, debug=True)
