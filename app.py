@@ -1,24 +1,24 @@
 from flask import Flask, request, jsonify, send_from_directory
+from flask_cors import CORS
 import os
 import uuid
+import shutil
 
 app = Flask(__name__)
+CORS(app)  # Allow requests from any origin
 
-# Folder to save uploaded and processed videos
+# Folders for uploads and processed videos
 UPLOAD_FOLDER = "/tmp/uploads"
 PROCESSED_FOLDER = "/tmp/processed"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(PROCESSED_FOLDER, exist_ok=True)
 
-# Dummy analysis function (replace with your actual cricket pose analysis)
+# Dummy analysis function (replace with your cricket pose analysis)
 def run_cricket_analysis(input_path):
-    # For demo, just copy the file to processed folder with new name
     filename = os.path.basename(input_path)
     processed_name = f"processed_{uuid.uuid4().hex}_{filename}"
     processed_path = os.path.join(PROCESSED_FOLDER, processed_name)
-    # Here you would run your actual analysis code
-    # For now, just copy the uploaded file
-    import shutil
+    # Copy file as placeholder for real analysis
     shutil.copy(input_path, processed_path)
     return processed_name
 
@@ -38,8 +38,8 @@ def analyze():
     # Run analysis
     processed_filename = run_cricket_analysis(saved_path)
 
-    # Generate URL for frontend (serve via /processed/<filename>)
-    analysis_url = f"/processed/{processed_filename}"
+    # Generate full URL for frontend (replace with your actual deployed domain)
+    analysis_url = f"https://cricketing-technique-analyzer.onrender.com/processed/{processed_filename}"
 
     return jsonify({
         'status': 'Analysis complete!',
