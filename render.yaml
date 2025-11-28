@@ -1,10 +1,6 @@
 services:
   - type: web
     name: cricket-analyzer
-    runtime: python
-    buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT
-    envVars:
-      - key: PYTHON_VERSION
-        value: 3.10.9
-    autoDeploy: true
+    env: docker
+    plan: starter
+    dockerfilePath: Dockerfile
