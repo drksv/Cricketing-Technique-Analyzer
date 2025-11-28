@@ -1,1 +1,1 @@
-web: uvicorn app:app --host 0.0.0.0 --port $PORT --timeout-keep-alive 120 --timeout-graceful-shutdown 120
+web: gunicorn app:app --workers=1 --threads=2 --timeout=180 --preload
