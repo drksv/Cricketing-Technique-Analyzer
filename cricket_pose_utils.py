@@ -1,131 +1,141 @@
+# cricket_pose_utils.py
+import os
+import tempfile
+import urllib.request
 import cv2
-import mediapipe as mp
 import numpy as np
+import logging
+from typing import List
 
-# ------------------------------------------------------------
-# 1. Load MediaPipe Pose ONCE (major optimization)
-# ------------------------------------------------------------
-mp_pose = mp.solutions.pose
-_pose = mp_pose.Pose(
-    static_image_mode=True,        # Faster for frame-by-frame
-    model_complexity=0,            # Lite model — required for low memory
-    smooth_landmarks=False,
-    enable_segmentation=False
-)
+# use already-loaded _pose from app import to avoid re-init — but if running standalone, create local Pose
+try:
+    from app import _pose as GLOBAL_POSE  # when run under Gunicorn with preload
+except Exception:
+    import mediapipe as mp
+    GLOBAL_POSE = mp.solutions.pose.Pose(
+        static_image_mode=True, model_complexity=0, smooth_landmarks=False, enable_segmentation=False
+    )
 
-# ------------------------------------------------------------
-# 2. Extract pose landmarks from video (optimized)
-# ------------------------------------------------------------
-def extract_landmarks_from_video(video_path, frame_skip=5, max_frames=150):
+logging.basicConfig(level=logging.INFO)
+
+# Cache for ideal video paths by scenario
+IDEAL_CACHE = {}
+
+def download_and_cache_ideal(scenario: str, url: str, max_bytes: int = 25 * 1024 * 1024) -> str:
     """
-    Extract pose landmarks from a video by sampling every Nth frame.
-    - frame_skip=5 → processes every 6th frame → huge speed boost
-    - max_frames caps usage so Render workers don't timeout
+    Download ideal video once per instance and cache on disk.
+    Returns local path.
+    """
+    if scenario in IDEAL_CACHE and os.path.exists(IDEAL_CACHE[scenario]):
+        return IDEAL_CACHE[scenario]
+
+    tmp_path = os.path.join(tempfile.gettempdir(), f"ideal_{scenario}.mp4")
+    if os.path.exists(tmp_path):
+        IDEAL_CACHE[scenario] = tmp_path
+        return tmp_path
+
+    logging.info(f"Downloading ideal video for {scenario} -> {tmp_path}")
+    req = urllib.request.Request(url, headers={"User-Agent": "healthtimeout-cricket-analyzer/1.0"})
+    with urllib.request.urlopen(req, timeout=15) as r:
+        total = 0
+        with open(tmp_path, "wb") as f:
+            while True:
+                chunk = r.read(1024 * 64)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > max_bytes:
+                    f.close()
+                    os.remove(tmp_path)
+                    raise ValueError("Ideal video too large")
+                f.write(chunk)
+
+    IDEAL_CACHE[scenario] = tmp_path
+    return tmp_path
+
+# parameters tuned for low-ram environments
+FRAME_SKIP = 4          # process 1 in every 4 frames
+MAX_PROCESSED_FRAMES = 120
+RESIZE_DIMS = (320, 180)  # low-res frames
+
+def extract_landmarks_from_video_path(video_path: str) -> List[List[tuple]]:
+    """
+    Extract simplified landmarks (x,y,z,visibility) per processed frame.
     """
     cap = cv2.VideoCapture(video_path)
-
     if not cap.isOpened():
-        print(f"[ERROR] Could not open video: {video_path}")
+        logging.warning(f"Cannot open video: {video_path}")
         return []
 
-    all_frames_landmarks = []
-    frame_count = 0
-    processed_frames = 0
+    landmarks_seq = []
+    frame_i = 0
+    processed = 0
 
-    try:
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        frame_i += 1
+        if frame_i % FRAME_SKIP != 0:
+            continue
 
-            # Skip frames for speed & memory
-            if frame_count % frame_skip != 0:
-                frame_count += 1
-                continue
+        # safety cap
+        if processed >= MAX_PROCESSED_FRAMES:
+            break
+        processed += 1
 
-            frame_count += 1
-            processed_frames += 1
+        try:
+            small = cv2.resize(frame, RESIZE_DIMS)
+        except Exception:
+            small = frame
 
-            # Safety cap → prevents Render timeouts
-            if processed_frames > max_frames:
-                break
+        rgb = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
+        results = GLOBAL_POSE.process(rgb)
+        if results and results.pose_landmarks:
+            lm = [(p.x, p.y, getattr(p, "z", 0.0), getattr(p, "visibility", 0.0)) for p in results.pose_landmarks.landmark]
+            landmarks_seq.append(lm)
 
-            # Downscale frame to reduce MediaPipe load
-            frame = cv2.resize(frame, (320, 180))  # lightweight resolution
+    cap.release()
+    return landmarks_seq
 
-            # Convert to RGB
-            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-
-            # Run pose detection
-            results = _pose.process(rgb)
-
-            # Save landmarks (if detected)
-            if results.pose_landmarks:
-                lm = [
-                    (
-                        lm.x,
-                        lm.y,
-                        lm.z,
-                        lm.visibility
-                    )
-                    for lm in results.pose_landmarks.landmark
-                ]
-                all_frames_landmarks.append(lm)
-
-    finally:
-        cap.release()
-
-    return all_frames_landmarks
-
-
-# ------------------------------------------------------------
-# 3. Compare user vs ideal pose sequences
-# ------------------------------------------------------------
-def compare_landmark_sequences(user_seq, ideal_seq):
-    """
-    Compute a simple difference score between two landmark sequences.
-    The shorter one determines the number of frames used.
-    """
-
-    if len(user_seq) == 0 or len(ideal_seq) == 0:
-        return {
-            "score": 0,
-            "feedback": "Unable to extract pose landmarks from one or both videos."
-        }
+def compare_sequences(user_seq, ideal_seq):
+    if not user_seq or not ideal_seq:
+        return {"score": 0, "issues": ["Could not extract poses from one or both videos."]}
 
     n = min(len(user_seq), len(ideal_seq))
     diffs = []
+    issues = []
 
     for i in range(n):
-        u = np.array(user_seq[i])
-        v = np.array(ideal_seq[i])
+        u = np.array(user_seq[i])[:, :3]
+        v = np.array(ideal_seq[i])[:, :3]
+        # align based on number of landmarks; if mismatch skip
+        if u.shape != v.shape:
+            continue
+        dist = np.linalg.norm(u - v, axis=1)
+        diffs.append(np.mean(dist))
+        # Key joint checks (indices are from MediaPipe pose landmarks)
+        key_joints = {"Shoulder": 11, "Elbow": 13, "Knee": 25, "Ankle": 27}
+        for name, idx in key_joints.items():
+            if idx < u.shape[0]:
+                if dist[idx] > 0.08:
+                    issues.append(f"Frame {i+1}: {name} misaligned (diff {dist[idx]:.3f})")
 
-        # Euclidean difference across landmarks
-        diff = np.linalg.norm(u[:, :3] - v[:, :3])
-        diffs.append(diff)
+    if not diffs:
+        return {"score": 0, "issues": ["No comparable frames found."]}
 
     avg_diff = float(np.mean(diffs))
+    score = max(0.0, min(100.0, 100.0 - (avg_diff * 100.0)))  # heuristic
+    if not issues:
+        issues = ["Looks good — minimal adjustments needed."]
 
-    # Lower diff → better similarity
-    score = max(0, 100 - avg_diff * 10)
+    return {"score": round(score, 2), "issues": issues, "avg_frame_diff": round(avg_diff, 4)}
 
-    return {
-        "score": round(score, 2),
-        "avg_difference": round(avg_diff, 4)
-    }
+# High-level functions used by app.py
+def perform_analysis(user_video_path: str, ideal_video_path: str):
+    user_seq = extract_landmarks_from_video_path(user_video_path)
+    ideal_seq = extract_landmarks_from_video_path(ideal_video_path)
+    return compare_sequences(user_seq, ideal_seq)
 
-
-# ------------------------------------------------------------
-# 4. High-level API called by Flask endpoint
-# ------------------------------------------------------------
-def analyze_video_vs_ideal(user_video_path, ideal_video_path):
-    print("[INFO] Extracting user video pose...")
-    user_lm = extract_landmarks_from_video(user_video_path)
-
-    print("[INFO] Extracting ideal video pose...")
-    ideal_lm = extract_landmarks_from_video(ideal_video_path)
-
-    print("[INFO] Comparing pose frames...")
-    result = compare_landmark_sequences(user_lm, ideal_lm)
-
-    return result
+# expose download function for app.py import usage
+download_and_cache_ideal = download_and_cache_ideal
