@@ -1,61 +1,68 @@
-from fastapi import FastAPI, File, UploadFile, Form
-from fastapi.responses import JSONResponse
-import cv2
+import os
 import tempfile
-from cricket_pose_utils import PoseAnalyzer
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+import requests
 
-app = FastAPI()
-analyzer = PoseAnalyzer()
+from cricket_pose_utils import analyze_video_vs_ideal
 
-@app.get("/")
+app = Flask(__name__)
+CORS(app)
+
+@app.route("/", methods=["GET"])
 def home():
-    return {"message": "Cricket Analyzer API Running"}
+    return {"status": "Cricket Pose Analyzer is live!"}
 
-@app.post("/analyze")
-async def analyze_video(
-    user_video: UploadFile = File(...),
-    ideal_url: str = Form(...)
-):
+@app.route("/analyze", methods=["POST"])
+def analyze_video():
     try:
-        # save uploaded video temporarily
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
-            tmp.write(await user_video.read())
-            temp_path = tmp.name
+        if "user_video" not in request.files:
+            return jsonify({"error": "Missing user_video"}), 400
 
-        cap = cv2.VideoCapture(temp_path)
+        ideal_url = request.form.get("ideal_url")
+        if not ideal_url:
+            return jsonify({"error": "Missing ideal_url"}), 400
 
-        if not cap.isOpened():
-            return JSONResponse({"error": "Could not read video"}, status_code=400)
+        user_video = request.files["user_video"]
 
-        all_angles = []
-        frame_count = 0
+        # --- SAFETY LIMIT: reject > 30 MB files ---
+        user_video.seek(0, os.SEEK_END)
+        size_mb = user_video.tell() / (1024 * 1024)
+        if size_mb > 30:
+            return jsonify({"error": "User video too large (max 30 MB)"}), 413
+        user_video.seek(0)
 
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
+        # Save user video
+        t_user = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+        user_video.save(t_user.name)
 
-            frame_count += 1
+        # Download ideal video
+        t_ideal = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+        r = requests.get(ideal_url, stream=True, timeout=5)
+        if r.status_code != 200:
+            return jsonify({"error": "Failed downloading ideal video"}), 400
 
-            # process 1 every 5 frames for performance
-            if frame_count % 5 == 0:
-                result = analyzer.analyze_frame(frame)
-                if result["status"] == "ok":
-                    all_angles.append(result["elbow_angle"])
+        downloaded = 0
+        for chunk in r.iter_content(1024 * 64):
+            downloaded += len(chunk)
+            if downloaded > (25 * 1024 * 1024):     # 25MB limit
+                return jsonify({"error": "Ideal video too large"}), 413
+            t_ideal.write(chunk)
+        t_ideal.flush()
 
-        cap.release()
+        # Run analysis
+        result = analyze_video_vs_ideal(t_user.name, t_ideal.name)
 
-        if not all_angles:
-            return JSONResponse({"error": "No pose detected"}, status_code=400)
+        # Cleanup
+        os.remove(t_user.name)
+        os.remove(t_ideal.name)
 
-        avg_angle = sum(all_angles) / len(all_angles)
-
-        return {
-            "ideal_reference_used": ideal_url,
-            "average_elbow_angle": round(avg_angle, 2),
-            "total_frames_analyzed": len(all_angles),
-            "status": "success"
-        }
+        return jsonify(result)
 
     except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
+        return jsonify({"error": "Server Error", "details": str(e)}), 500
+
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
