@@ -5,6 +5,14 @@ import urllib.request
 import tempfile
 import os
 
+import mediapipe as mp
+
+if not hasattr(mp, "solutions"):
+    raise RuntimeError(
+        "MediaPipe solutions not available. "
+        "Ensure Python <= 3.10 and mediapipe is correctly installed."
+    )
+
 mp_pose = mp.solutions.pose
 
 # -----------------------------
@@ -187,3 +195,4 @@ def analyze_video_vs_ideal(user_video_file, ideal_video_url, scenario, fatigue_e
         "issues": issues if issues else ["Technique looks solid."],
         "fatigue": fatigue_result
     }
+
